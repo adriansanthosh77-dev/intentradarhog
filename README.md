@@ -262,6 +262,293 @@ Primary route:
 
 ## Architecture
 
+Intent Radar is a browser-based GTM intelligence loop. It has four major layers:
+
+1. Frontend radar UI
+2. The Hog intelligence layer
+3. Scoring, gating, and routing engine
+4. NVIDIA copy and reply-learning loop
+
+At a high level, the app works like this:
+
+```text
+User starts engine or selects a lead
+  -> Intent Radar loads seeded or Hog-discovered accounts
+  -> The Hog finds companies, people, signals, or research context
+  -> cheap gates reject weak signals before spend
+  -> qualified leads get scored and ranked
+  -> the best lead signal is sent into NVIDIA copy generation
+  -> the lead is routed to Smartlead, HeyReach, or partner/manual DM
+  -> sandbox reply webhook fires
+  -> NVIDIA simulates/classifies the reply
+  -> reply treatment mutates the next copy version
+```
+
+The goal is not just to find leads. The goal is to decide which leads deserve spend, which channel they belong in, and what exact pain should drive the message.
+
+### System Map
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                         Intent Radar UI                         │
+│  Dashboard | Lead Cards | Signal Feed | Copy Panel | Reply Loop │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        Engine Orchestrator                      │
+│  lead limit | live/paused mode | selected lead preview | logs    │
+└───────────────┬───────────────────────┬─────────────────────────┘
+                │                       │
+                ▼                       ▼
+┌─────────────────────────────┐   ┌───────────────────────────────┐
+│       The Hog API Layer      │   │        NVIDIA LLM Layer        │
+│ company search               │   │ signal-specific copy           │
+│ people search                │   │ simulated replies              │
+│ deep research                │   │ objection classification        │
+│ enrichment                   │   │ copy mutation                   │
+│ web/social scrape            │   └───────────────────────────────┘
+│ async operation polling      │
+└───────────────┬─────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Qualification + Scoring Engine                │
+│ pre-filter | ICP gate | deal-size estimate | confidence band     │
+└───────────────┬─────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        Channel Router                           │
+│ Smartlead sandbox | HeyReach sandbox | Partner/manual DM sandbox │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Frontend Layer
+
+The UI is the operating surface for the GTM loop.
+
+Main views:
+
+- Dashboard: shows the demo timeline, stage progress, and high-level counts.
+- Lead cards: show account score, ICP, confidence band, route, and current status.
+- Signal feed: shows passed and rejected signals, including grey rejected noise.
+- Detail panel: shows brief, contacts, outreach, confidence, copy, and reply state.
+- Copy evolution: shows how copy changes after simulated replies.
+- API log: shows real Hog/NVIDIA calls and sandbox automation events.
+
+The UI is intentionally not just a CRM table. It is built to show the decision process: why a lead passed, what endpoint produced the data, what signal drove the copy, and which channel the system chose.
+
+### Intelligence Layer: The Hog
+
+The Hog is used as the live data and research system.
+
+The app uses it for:
+
+- Company discovery
+- Decision-maker discovery
+- Deep research across public web context
+- Contact enrichment
+- Web and social scraping
+- Async operation polling
+
+The most important architecture decision is that The Hog is not treated like a simple enrichment database. It is treated as the intelligence layer that can discover, validate, and research leads before the outreach system spends effort on them.
+
+Async behavior matters:
+
+```text
+POST company/people/deep-research request
+  -> receive 202 and operationId
+  -> poll GET /api/operations/:id
+  -> wait for succeeded / failed / partial_success / cancelled
+  -> extract result
+  -> update lead state and UI
+```
+
+This lets long-running discovery and research jobs happen without freezing the UI.
+
+### Qualification Layer
+
+The qualification engine protects credits and inbox reputation.
+
+It has two stages:
+
+```text
+Stage 1: cheap signal gate
+  -> role check
+  -> pain keyword check
+  -> recency check
+  -> reject weak signals before enrichment
+
+Stage 2: ICP and deal-size validation
+  -> agency or expert fit
+  -> tech stack / topic checks
+  -> estimated deal size
+  -> confidence band
+```
+
+This is the core GTM engineering move. The system does not enrich every lead. It asks, "Is this worth learning more about?" before it spends credits.
+
+### Scoring Model
+
+Signals are scored by strength and freshness.
+
+Examples:
+
+- Expressed pain: high-value signal
+- Hiring: strong operational timing signal
+- Tech stack: fit signal
+- Deep research: strong context signal
+- Instagram/comment intent: early social intent signal
+- Stale signal: rejected or heavily discounted
+
+The engine also groups independent signals so one repeated event does not fake high confidence.
+
+Confidence bands:
+
+- A: high confidence, ready for immediate route
+- B: good signal, may need review or more context
+- C: watchlist
+- D: rejected or low priority
+
+### Copy Layer: NVIDIA LLM
+
+NVIDIA handles the adaptive copy loop.
+
+The copy engine receives:
+
+- Lead ICP
+- Account name
+- Strongest signal
+- Signal source
+- Tech stack or pain context
+- Route/channel
+- Existing copy version
+
+It returns:
+
+- First-touch email or DM copy
+- A hook based on the real signal
+- Metadata showing whether copy came from NVIDIA, saved snapshot, or fallback template
+
+The rule is simple: no real signal, no generic copy. If the lead does not have a meaningful hook, it should stay in watch mode.
+
+### Routing Layer
+
+The routing engine decides where the lead should go.
+
+```text
+Agency + LinkedIn/social context
+  -> HeyReach-style LinkedIn route
+
+Verified email + clear buying signal
+  -> Smartlead-style cold email route
+
+Individual expert / channel value
+  -> partner/manual DM route
+```
+
+This avoids treating every lead as an email target. Channel fit is part of the qualification system.
+
+### Reply Learning Layer
+
+Replies are simulated through the sandbox webhook so the demo can show the full learning loop without sending real outreach.
+
+Reply flow:
+
+```text
+Sandbox enrollment
+  -> simulated reply webhook
+  -> NVIDIA reply generation
+  -> reply classification
+  -> treatment selection
+  -> copy mutation
+  -> updated next action
+```
+
+Reply treatments:
+
+- `interested`: keep the copy as the winning variant.
+- `not_now`: soften CTA and add timing-based follow-up.
+- `wrong_person`: retarget the role or ask for a referral.
+- `objection`: add proof, risk reversal, or integration detail.
+- `no_reply`: wait for a new signal before mutating.
+
+This turns outbound from a static sequence into a feedback loop.
+
+### Data Flow Example
+
+Example: Clay/Apollo agency lead
+
+```text
+1. Hog company search finds a GTM agency.
+2. Signal gate detects Clay/Apollo/outbound workflow relevance.
+3. Lead passes agency ICP gate.
+4. Hog deep research looks for public pain, stack, or decision-maker context.
+5. Hog people search attempts to find founder / CEO / RevOps contact.
+6. Hog enrichment runs only if LinkedIn URL or email exists.
+7. NVIDIA writes copy around the strongest signal.
+8. Route chooses HeyReach if LinkedIn context is strongest.
+9. Sandbox reply webhook simulates response.
+10. Reply loop mutates copy based on interest, objection, timing, or wrong-person result.
+```
+
+Example: individual GTM expert
+
+```text
+1. Signal appears from public content, comment intent, or expert profile.
+2. Cheap gate checks role, topic, pain keyword, and recency.
+3. Expert ICP gate checks Clay/Apollo/GTM topic fit.
+4. Deal value is treated as direct subscription or channel value.
+5. NVIDIA writes a more personal partner-style note.
+6. Route chooses partner/manual DM unless verified email and direct buying intent exist.
+7. Reply loop decides whether to keep, soften, retarget, or add proof.
+```
+
+### Failure and Fallback Behavior
+
+The architecture is designed to keep moving even when an endpoint returns no data.
+
+Examples:
+
+- If people search returns `empty_clean`, the lead does not get fake contacts.
+- If no LinkedIn URL or email exists, enrichment is skipped.
+- If NVIDIA is unavailable, the app falls back to local copy templates.
+- If deep research is still processing, the UI keeps the lead in research/pending state.
+- If a signal fails the gate, it appears as rejected noise instead of entering outreach.
+
+This matters because the demo should be honest. No placeholder contacts, no fake enrichment, no fake sending.
+
+### Production Architecture Direction
+
+The current prototype calls APIs from the browser for speed of demo development. A production version should move API calls server-side.
+
+Production shape:
+
+```text
+React UI
+  -> backend API
+  -> job queue for Hog async work
+  -> database for leads/signals/replies/copy versions
+  -> secure Hog/NVIDIA API clients
+  -> real Smartlead/HeyReach integrations
+  -> webhook receiver for replies
+  -> analytics and credit ledger
+```
+
+Production upgrades needed:
+
+- Server-side API keys
+- Auth
+- Database persistence
+- Credit ledger per operation
+- Background job queue
+- Real webhook receiver
+- Real Smartlead and HeyReach integrations
+- Human approval before live sending
+
+## Engine Modes
+
 Intent Radar has two engine modes.
 
 ### Engine A: ICP -> Lead -> Signal -> Enrichment
